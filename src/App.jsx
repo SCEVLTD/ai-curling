@@ -1,3 +1,4 @@
+import { Analytics } from '@vercel/analytics/react'
 import AICurlingGame from './AICurlingGame'
 
 const globalCSS = `
@@ -17,6 +18,7 @@ export default function App() {
     <>
       <style>{globalCSS}</style>
       <AICurlingGame />
+      <Analytics />
     </>
   )
 }

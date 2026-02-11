@@ -101,19 +101,168 @@ export default function AICurlingGame() {
   const [sweeping, setSweeping] = useState(false);
   const [trail, setTrail] = useState([]);
   const [tutStep, setTutStep] = useState(0);
-  const [showTut, setShowTut] = useState(true);
+  const [showTut, setShowTut] = useState(() => !localStorage.getItem('curling_tutorial_seen'));
+  const [bestScore, setBestScore] = useState(() => parseInt(localStorage.getItem('curling_best_score') || '0'));
   const [dragPower, setDragPower] = useState(0);
   const [sweepCount, setSweepCount] = useState(0);
   const [sweepMarks, setSweepMarks] = useState([]);
   // Landed stones are now physics objects that can be knocked
   const [landed, setLanded] = useState([]);
+  const [showToast, setShowToast] = useState(false);
+  const [toastMessage, setToastMessage] = useState("");
+  // T1+T2: Dynamic rink scaling for mobile
+  const [rinkScale, setRinkScale] = useState(1);
   const animRef = useRef(null);
   const sweepRef = useRef(false);
   const posRef = useRef(null);
   const velRef = useRef(null);
   const landedRef = useRef([]);
+  // DOM refs for direct manipulation during animation (avoids per-frame React re-renders)
+  const stoneDomRef = useRef(null);
+  const trailDomRef = useRef(null);
+  // Keyboard control state
+  const [aimAngle, setAimAngle] = useState(-Math.PI / 2);
+  const [keyCharging, setKeyCharging] = useState(false);
+  const [keyPower, setKeyPower] = useState(0);
+  const chargingRef = useRef(false);
+  const chargeStartRef = useRef(null);
+  const chargeAnimRef = useRef(null);
+  const [isDesktop, setIsDesktop] = useState(false);
+  // T11: Sound system refs and state
+  const audioCtxRef = useRef(null);
+  const lastCollisionSoundRef = useRef(0);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+
+  // T12: Haptic feedback helper
+  const vibrate = useCallback((pattern) => {
+    try { navigator.vibrate && navigator.vibrate(pattern); } catch (_) {}
+  }, []);
+
+  // T11: Sound effects using Web Audio API (no audio files needed)
+  const playSound = useCallback((type) => {
+    if (!soundEnabled) return;
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume();
+      const now = ctx.currentTime;
+
+      if (type === "throw") {
+        // Quick descending tone (300hz to 150hz over 200ms), sine wave
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.linearRampToValueAtTime(150, now + 0.2);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.2);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.2);
+      } else if (type === "sweep") {
+        // Short white noise burst (50ms)
+        const bufferSize = Math.floor(ctx.sampleRate * 0.05);
+        const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.3;
+        const noise = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        noise.buffer = buffer;
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.05);
+        noise.connect(gain).connect(ctx.destination);
+        noise.start(now);
+      } else if (type === "collide") {
+        // Sharp click (800hz, 30ms, square wave)
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "square";
+        osc.frequency.setValueAtTime(800, now);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.03);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.03);
+      } else if (type === "score") {
+        // Pleasant ascending tone (400hz to 800hz over 300ms, sine wave)
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.linearRampToValueAtTime(800, now + 0.3);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.3);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.3);
+      } else if (type === "perfect") {
+        // Double ascending tone for 100-point scores (two quick ascending notes)
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        osc1.type = "sine";
+        osc1.frequency.setValueAtTime(400, now);
+        osc1.frequency.linearRampToValueAtTime(800, now + 0.15);
+        gain1.gain.setValueAtTime(0.25, now);
+        gain1.gain.linearRampToValueAtTime(0, now + 0.15);
+        osc1.connect(gain1).connect(ctx.destination);
+        osc1.start(now);
+        osc1.stop(now + 0.15);
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = "sine";
+        osc2.frequency.setValueAtTime(600, now + 0.18);
+        osc2.frequency.linearRampToValueAtTime(1200, now + 0.33);
+        gain2.gain.setValueAtTime(0.3, now + 0.18);
+        gain2.gain.linearRampToValueAtTime(0, now + 0.33);
+        osc2.connect(gain2).connect(ctx.destination);
+        osc2.start(now + 0.18);
+        osc2.stop(now + 0.33);
+      }
+    } catch (_) {}
+  }, [soundEnabled]);
 
   useEffect(() => { landedRef.current = landed; }, [landed]);
+
+  // T1+T2: Dynamically scale rink to fit viewport
+  useEffect(() => {
+    const updateScale = () => {
+      // Available height = viewport height minus HUD (~36px) + stone label (~40px) + footer (~28px) + padding (~30px)
+      const hudAndChrome = 134;
+      const availH = window.innerHeight - hudAndChrome;
+      const availW = window.innerWidth - 20; // 10px padding each side
+      const scaleH = availH / RINK_H;
+      const scaleW = availW / RINK_W;
+      setRinkScale(Math.min(scaleH, scaleW, 1.6)); // scale up on large screens, cap at 1.6
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    const handleOrientation = () => setTimeout(updateScale, 100);
+    window.addEventListener('orientationchange', handleOrientation);
+    return () => {
+      window.removeEventListener('resize', updateScale);
+      window.removeEventListener('orientationchange', handleOrientation);
+    };
+  }, []);
+
+  // T3+T5: Lock body scroll during gameplay
+  useEffect(() => {
+    if (screen === "play") {
+      const orig = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      document.documentElement.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = orig;
+        document.documentElement.style.overflow = '';
+      };
+    }
+  }, [screen]);
+
+  // Detect desktop (hover-capable device) for keyboard hint
+  useEffect(() => {
+    try { setIsDesktop(window.matchMedia('(hover: hover)').matches); } catch (_) {}
+  }, []);
 
   const resetStone = useCallback(() => {
     setStonePos({ x: START_X, y: START_Y });
@@ -124,13 +273,33 @@ export default function AICurlingGame() {
     setLastScore(null);
     setSweeping(false);
     setTrail([]);
+    // Clear DOM trail container
+    if (trailDomRef.current) trailDomRef.current.innerHTML = '';
     setDragPower(0);
     setSweepCount(0);
     setSweepMarks([]);
     sweepRef.current = false;
+    setAimAngle(-Math.PI / 2);
+    setKeyCharging(false);
+    setKeyPower(0);
+    chargingRef.current = false;
+    chargeStartRef.current = null;
+    if (chargeAnimRef.current) { cancelAnimationFrame(chargeAnimRef.current); chargeAnimRef.current = null; }
   }, []);
 
   useEffect(() => { if (screen === "play") resetStone(); }, [screen, currentStone, resetStone]);
+
+  // T13: Persist high score when reaching results screen
+  useEffect(() => {
+    if (screen === "results") {
+      const finalScore = scores.reduce((s, x) => s + x.points, 0);
+      const currentBest = parseInt(localStorage.getItem('curling_best_score') || '0');
+      if (finalScore > currentBest) {
+        localStorage.setItem('curling_best_score', String(finalScore));
+        setBestScore(finalScore);
+      }
+    }
+  }, [screen, scores]);
 
   const scaleCoord = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -143,7 +312,7 @@ export default function AICurlingGame() {
   const handlePointerDown = (e) => {
     if (animating || screen !== "play" || showTut) return;
     const { x, y } = scaleCoord(e);
-    if (Math.hypot(x - stonePos.x, y - stonePos.y) < 55) {
+    if (Math.hypot(x - stonePos.x, y - stonePos.y) < 75) {
       setDragging(true);
       setDragStart({ x, y });
       setDragCurrent({ x, y });
@@ -174,9 +343,11 @@ export default function AICurlingGame() {
     setDragStart(null);
     setDragCurrent(null);
     setDragPower(0);
+    // T11: Play throw sound
+    playSound("throw");
   };
 
-  const handleSweep = () => {
+  const handleSweep = useCallback(() => {
     if (!animating) return;
     sweepRef.current = true;
     setSweeping(true);
@@ -189,17 +360,124 @@ export default function AICurlingGame() {
         id: Date.now() + Math.random(),
       }]);
     }
+    // T11: Play sweep sound | T12: Haptic pulse
+    playSound("sweep");
+    vibrate(10);
     setTimeout(() => { sweepRef.current = false; setSweeping(false); }, 180);
-  };
+  }, [animating, playSound, vibrate]);
 
-  // Main physics loop
+  // Keyboard controls useEffect
+  useEffect(() => {
+    if (screen !== "play") return;
+
+    const handleKeyDown = (e) => {
+      // Ignore keyboard when tutorial or score popup is showing
+      if (showTut || showResult) return;
+
+      const key = e.key;
+
+      // During animation: spacebar triggers sweep
+      if (animating) {
+        if (key === " ") {
+          e.preventDefault();
+          handleSweep();
+        }
+        return;
+      }
+
+      // Aiming phase: stone is stationary, not animating, not showing result
+      if (key === "ArrowLeft") {
+        e.preventDefault();
+        setAimAngle(prev => prev - 0.05);
+      } else if (key === "ArrowRight") {
+        e.preventDefault();
+        setAimAngle(prev => prev + 0.05);
+      } else if ((key === " " || key === "ArrowUp") && !e.repeat) {
+        e.preventDefault();
+        // Start charging power
+        chargingRef.current = true;
+        chargeStartRef.current = performance.now();
+        setKeyCharging(true);
+        setKeyPower(0);
+      }
+    };
+
+    const handleKeyUp = (e) => {
+      if (showTut || showResult) return;
+      const key = e.key;
+
+      // Fire stone on release of charge key (only during aiming phase)
+      if ((key === " " || key === "ArrowUp") && chargingRef.current && !animating) {
+        e.preventDefault();
+        chargingRef.current = false;
+        setKeyCharging(false);
+
+        // Calculate final power from charge duration
+        const elapsed = performance.now() - chargeStartRef.current;
+        const power = Math.min((elapsed / 2000) * MAX_POWER, MAX_POWER);
+        chargeStartRef.current = null;
+
+        if (power < 1.2) {
+          setKeyPower(0);
+          return;
+        }
+
+        // Fire in the current aim direction
+        const vel = { x: Math.cos(aimAngle) * power, y: Math.sin(aimAngle) * power };
+        velRef.current = vel;
+        posRef.current = { ...posRef.current };
+        setAnimating(true);
+        setKeyPower(0);
+        playSound("throw");
+        vibrate(15);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [screen, showTut, showResult, animating, aimAngle, handleSweep, playSound, vibrate]);
+
+  // Power charging animation loop
+  useEffect(() => {
+    if (!keyCharging) {
+      if (chargeAnimRef.current) { cancelAnimationFrame(chargeAnimRef.current); chargeAnimRef.current = null; }
+      return;
+    }
+
+    const animateCharge = () => {
+      if (!chargingRef.current || !chargeStartRef.current) return;
+      const elapsed = performance.now() - chargeStartRef.current;
+      const power = Math.min((elapsed / 2000) * MAX_POWER, MAX_POWER);
+      setKeyPower(power);
+      chargeAnimRef.current = requestAnimationFrame(animateCharge);
+    };
+
+    chargeAnimRef.current = requestAnimationFrame(animateCharge);
+    return () => {
+      if (chargeAnimRef.current) { cancelAnimationFrame(chargeAnimRef.current); chargeAnimRef.current = null; }
+    };
+  }, [keyCharging]);
+
+  // Main physics loop — uses direct DOM manipulation to avoid per-frame React re-renders.
+  // Stone position and trail are updated via refs (stoneDomRef, trailDomRef) during animation.
+  // React state is only synced once when animation ends.
   useEffect(() => {
     if (!animating || !velRef.current) return;
 
     let pos = { ...posRef.current };
     let vel = { ...velRef.current };
-    let trailPts = [];
+    let trailCount = 0;
     let frameCount = 0;
+    const MAX_TRAIL = 50;
+
+    // Clear any previous trail dots from DOM
+    if (trailDomRef.current) {
+      trailDomRef.current.innerHTML = '';
+    }
 
     const animate = () => {
       frameCount++;
@@ -271,6 +549,16 @@ export default function AICurlingGame() {
         }
       }
 
+      // T11: Collision sound (throttled to max 1 per 100ms) | T12: Haptic thud
+      if (hadCollision) {
+        const nowMs = performance.now();
+        if (nowMs - lastCollisionSoundRef.current > 100) {
+          lastCollisionSoundRef.current = nowMs;
+          playSound("collide");
+          vibrate(25);
+        }
+      }
+
       // Update landed stones physics (knocked stones slide)
       for (let i = 0; i < updatedLanded.length; i++) {
         const s = updatedLanded[i];
@@ -326,17 +614,44 @@ export default function AICurlingGame() {
         landedRef.current = updatedLanded;
       }
 
+      // Update position ref (no React re-render)
       posRef.current = { ...pos };
-      setStonePos({ ...pos });
 
-      trailPts.push({ x: pos.x, y: pos.y });
-      if (trailPts.length > 50) trailPts = trailPts.slice(-50);
-      setTrail([...trailPts]);
+      // Direct DOM update for stone position (skip React reconciliation)
+      if (stoneDomRef.current) {
+        stoneDomRef.current.style.left = (pos.x - STONE_R - 4) + 'px';
+        stoneDomRef.current.style.top = (pos.y - STONE_R - 4) + 'px';
+      }
+
+      // Direct DOM update for trail (append dot, remove old ones beyond MAX_TRAIL)
+      if (trailDomRef.current) {
+        const dot = document.createElement('div');
+        dot.style.cssText = `position:absolute;left:${pos.x - 2}px;top:${pos.y - 2}px;width:4px;height:4px;border-radius:50%;pointer-events:none;`;
+        trailDomRef.current.appendChild(dot);
+        trailCount++;
+        // Remove oldest dots if over limit
+        while (trailDomRef.current.childNodes.length > MAX_TRAIL) {
+          trailDomRef.current.removeChild(trailDomRef.current.firstChild);
+        }
+        // Update opacity of all trail dots (oldest=faint, newest=visible)
+        const children = trailDomRef.current.childNodes;
+        const total = children.length;
+        for (let ci = 0; ci < total; ci++) {
+          children[ci].style.opacity = ((ci + 1) / total) * 0.2;
+          children[ci].style.background = STONES[currentStone].color;
+        }
+      }
 
       const speed = Math.hypot(vel.x, vel.y);
       const allStopped = !updatedLanded.some(s => s.moving);
 
       if (speed < 0.1 && allStopped) {
+        // Sync final position to React state (one render)
+        setStonePos({ ...pos });
+        // Clear trail DOM and React state
+        if (trailDomRef.current) trailDomRef.current.innerHTML = '';
+        setTrail([]);
+
         // Score based on final position
         const dist = Math.hypot(pos.x - TARGET_X, pos.y - TARGET_Y);
         let points = 0, label = "OFF TARGET";
@@ -345,6 +660,15 @@ export default function AICurlingGame() {
         }
         setLastScore({ points, label, message: getMessage(points) });
         setScores(prev => [...prev, { stone: STONES[currentStone], points }]);
+
+        // T11: Play score or perfect sound | T12: Haptic patterns
+        if (points === 100) {
+          playSound("perfect");
+          vibrate([50, 30, 50, 30, 100]);
+        } else {
+          playSound("score");
+          vibrate([50, 30, 50]);
+        }
 
         // Add current stone to landed
         const newLanded = [...landedRef.current, {
@@ -363,8 +687,12 @@ export default function AICurlingGame() {
     };
 
     animRef.current = requestAnimationFrame(animate);
-    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
-  }, [animating]);
+    return () => {
+      if (animRef.current) cancelAnimationFrame(animRef.current);
+      // Clean up trail DOM on unmount/re-run
+      if (trailDomRef.current) trailDomRef.current.innerHTML = '';
+    };
+  }, [animating, currentStone, playSound, vibrate]);
 
   const nextStone = () => {
     if (currentStone < STONES.length - 1) setCurrentStone(p => p + 1);
@@ -383,29 +711,10 @@ export default function AICurlingGame() {
     return { grade: "Spreadsheet Survivor", icon: "📉", text: "Your processes need serious help. Let's talk!", color: BRAND.red };
   };
 
-  const CSS = `
-    @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700;800&display=swap');
-    @keyframes tutPulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(37,99,235,0.4)}50%{transform:scale(1.1);box-shadow:0 0 0 14px rgba(37,99,235,0)}}
-    @keyframes tutTap{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-8px) scale(0.9)}}
-    @keyframes tutDrag{0%,100%{transform:translateY(0)}50%{transform:translateY(25px)}}
-    @keyframes tutLine{0%,100%{opacity:0.3;height:20px}50%{opacity:1;height:40px}}
-    @keyframes tutSweep{0%,100%{transform:rotate(-15deg)}50%{transform:rotate(15deg)}}
-    @keyframes fadeUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
-    @keyframes popIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.5)}60%{transform:translate(-50%,-50%) scale(1.05)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
-    @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
-    @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
-    @keyframes shimmer{0%{background-position:-200% center}100%{background-position:200% center}}
-    @keyframes stonePulse{0%,100%{box-shadow:0 0 0 0 rgba(37,99,235,0.5)}50%{box-shadow:0 0 0 14px rgba(37,99,235,0)}}
-    @keyframes sweepMark{from{opacity:0.6;transform:scale(1)}to{opacity:0;transform:scale(1.5)}}
-    @keyframes sweepFlash{0%,100%{border-color:rgba(37,99,235,0.13)}50%{border-color:rgba(37,99,235,0.4)}}
-    @keyframes broomSwing{0%,100%{transform:translateX(-6px) rotate(-8deg)}50%{transform:translateX(6px) rotate(8deg)}}
-  `;
-
   /* ═══ TITLE ═══ */
   if (screen === "title") {
     return (
       <div style={{ width: "100%", minHeight: "100vh", background: `linear-gradient(160deg,${BRAND.dark} 0%,#0f1a2e 50%,${BRAND.darkMid} 100%)`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: FONT, color: BRAND.white, overflow: "hidden", position: "relative", padding: "24px", boxSizing: "border-box" }}>
-        <style>{CSS}</style>
         <div style={{ position: "absolute", inset: 0, opacity: 0.03, backgroundImage: `linear-gradient(${BRAND.blue} 1px,transparent 1px),linear-gradient(90deg,${BRAND.blue} 1px,transparent 1px)`, backgroundSize: "40px 40px" }} />
 
         <div style={{ fontSize: "64px", animation: "float 3s ease-in-out infinite", marginBottom: "20px", filter: `drop-shadow(0 4px 20px ${BRAND.blue}44)` }}>🥌</div>
@@ -428,7 +737,13 @@ export default function AICurlingGame() {
           </div>
         </div>
 
-        <button onClick={() => { setScreen("play"); setCurrentStone(0); setScores([]); setLanded([]); landedRef.current = []; setShowTut(true); setTutStep(0); }}
+        {bestScore > 0 && (
+          <div style={{ animation: "fadeUp 0.8s ease-out 0.4s both", marginBottom: "20px", fontSize: "13px", fontWeight: 700, color: BRAND.blue, letterSpacing: "1px" }}>
+            BEST: {bestScore}/{maxScore}
+          </div>
+        )}
+
+        <button onClick={() => { setScreen("play"); setCurrentStone(0); setScores([]); setLanded([]); landedRef.current = []; const seen = localStorage.getItem('curling_tutorial_seen'); setShowTut(!seen); setTutStep(0); }}
           style={{ animation: "fadeUp 0.8s ease-out 0.5s both,pulse 2.5s ease-in-out 1.3s infinite", background: `linear-gradient(135deg,${BRAND.blue},${BRAND.blueDark})`, border: "none", borderRadius: "14px", padding: "18px 56px", fontSize: "18px", fontWeight: 800, color: BRAND.white, cursor: "pointer", letterSpacing: "2px", textTransform: "uppercase", boxShadow: `0 4px 30px ${BRAND.blue}55,0 1px 0 inset rgba(255,255,255,0.15)`, fontFamily: FONT }}>
           ▶ START GAME
         </button>
@@ -447,18 +762,50 @@ export default function AICurlingGame() {
   /* ═══ RESULTS ═══ */
   if (screen === "results") {
     const grade = getGrade();
-    const shareText = `🥌 I scored ${totalScore}/${maxScore} in BrandedAI's AI Curling Championship!\n\nMy grade: ${grade.icon} ${grade.grade}\n\nThink you can beat me? 👇\nhttps://www.brandedai.net`;
+    const isNewBest = totalScore > 0 && totalScore >= bestScore;
+    const shareText = `🥌 I scored ${totalScore}/${maxScore} in BrandedAI's AI Curling Championship!\n\nMy grade: ${grade.icon} ${grade.grade}\n\nThink you can beat me? 👇\nhttps://curling.brandedai.net/`;
+    const shareUrl = "https://curling.brandedai.net/";
+    const canNativeShare = typeof navigator !== "undefined" && !!navigator.share;
+
+    const handleShare = async () => {
+      // Copy to clipboard
+      navigator.clipboard?.writeText(shareText);
+      setToastMessage("Copied! Share on LinkedIn \uD83D\uDE80");
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 2500);
+
+      if (canNativeShare) {
+        try {
+          await navigator.share({ title: "AI Curling Championship", text: shareText, url: shareUrl });
+        } catch (e) {
+          // User cancelled or share failed — toast already shown
+        }
+      } else {
+        window.open("https://www.linkedin.com/sharing/share-offsite/?url=" + encodeURIComponent(shareUrl), "_blank");
+      }
+    };
 
     return (
       <div style={{ width: "100%", minHeight: "100vh", background: `linear-gradient(160deg,${BRAND.dark} 0%,#0f1a2e 50%,${BRAND.darkMid} 100%)`, display: "flex", flexDirection: "column", alignItems: "center", fontFamily: FONT, color: BRAND.white, overflow: "hidden", position: "relative", padding: "32px 20px", boxSizing: "border-box" }}>
-        <style>{CSS}</style>
         <div style={{ position: "absolute", inset: 0, opacity: 0.03, backgroundImage: `linear-gradient(${BRAND.blue} 1px,transparent 1px),linear-gradient(90deg,${BRAND.blue} 1px,transparent 1px)`, backgroundSize: "40px 40px" }} />
 
         <h2 style={{ fontSize: "14px", fontWeight: 700, margin: "0 0 4px", color: BRAND.grayLight, letterSpacing: "4px", animation: "fadeUp 0.6s ease-out" }}>FINAL SCORE</h2>
 
+        {isNewBest && (
+          <div style={{ animation: "fadeUp 0.6s ease-out 0.1s both, pulse 1.5s ease-in-out infinite", fontSize: "15px", fontWeight: 800, color: "#F59E0B", letterSpacing: "1px", margin: "8px 0 0" }}>
+            🎉 NEW HIGH SCORE!
+          </div>
+        )}
+
         <div style={{ animation: "fadeUp 0.6s ease-out 0.2s both", fontSize: "clamp(56px,12vw,72px)", fontWeight: 800, margin: "12px 0 4px", background: `linear-gradient(135deg,${grade.color},${BRAND.white})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
           {totalScore}<span style={{ fontSize: "clamp(24px,5vw,32px)" }}>/{maxScore}</span>
         </div>
+
+        {bestScore > 0 && (
+          <div style={{ animation: "fadeUp 0.6s ease-out 0.25s both", fontSize: "12px", fontWeight: 700, color: BRAND.blue, letterSpacing: "1px", marginBottom: "4px" }}>
+            BEST: {bestScore}
+          </div>
+        )}
 
         <div style={{ animation: "fadeUp 0.6s ease-out 0.35s both", display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
           <span style={{ fontSize: "28px" }}>{grade.icon}</span>
@@ -480,9 +827,9 @@ export default function AICurlingGame() {
         </div>
 
         <div style={{ animation: "fadeUp 0.6s ease-out 0.7s both", display: "flex", flexDirection: "column", gap: "10px", width: "100%", maxWidth: "320px" }}>
-          <button onClick={() => { navigator.clipboard?.writeText(shareText); alert("Copied! Share on LinkedIn 🚀"); }}
+          <button onClick={handleShare}
             style={{ fontFamily: FONT, background: "linear-gradient(135deg,#0077B5,#005885)", border: "none", borderRadius: "12px", padding: "14px 28px", fontSize: "14px", fontWeight: 700, color: BRAND.white, cursor: "pointer" }}>
-            📋 Copy & Share on LinkedIn
+            {canNativeShare ? "\uD83D\uDCE4 Share Score" : "\uD83D\uDCCB Share on LinkedIn"}
           </button>
           <button onClick={() => { setScreen("play"); setCurrentStone(0); setScores([]); setLanded([]); landedRef.current = []; setShowTut(false); }}
             style={{ fontFamily: FONT, background: `linear-gradient(135deg,${BRAND.blue},${BRAND.blueDark})`, border: "none", borderRadius: "12px", padding: "14px 28px", fontSize: "14px", fontWeight: 700, color: BRAND.white, cursor: "pointer" }}>
@@ -498,6 +845,31 @@ export default function AICurlingGame() {
           <span style={{ fontSize: "14px", fontWeight: 800, color: BRAND.blue }}>BrandedAI</span><br />
           <span style={{ fontSize: "11px", color: BRAND.gray }}>AI Automation That Actually Works • brandedai.net</span>
         </div>
+
+        {/* Toast notification */}
+        <style dangerouslySetInnerHTML={{ __html: "@keyframes toastSlideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}@keyframes toastFadeOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(10px)}}" }} />
+        {showToast && (
+          <div style={{
+            position: "fixed",
+            bottom: "32px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: BRAND.dark,
+            border: `1px solid ${BRAND.blue}`,
+            borderRadius: "12px",
+            padding: "14px 24px",
+            fontSize: "14px",
+            fontWeight: 700,
+            color: BRAND.white,
+            fontFamily: FONT,
+            boxShadow: `0 4px 24px ${BRAND.blue}44, 0 2px 8px rgba(0,0,0,0.5)`,
+            zIndex: 1000,
+            whiteSpace: "nowrap",
+            animation: "toastSlideUp 0.3s ease-out, toastFadeOut 0.4s ease-in 2.1s forwards",
+          }}>
+            {toastMessage}
+          </div>
+        )}
       </div>
     );
   }
@@ -506,11 +878,10 @@ export default function AICurlingGame() {
   const stone = STONES[currentStone];
 
   return (
-    <div style={{ width: "100%", minHeight: "100vh", background: `linear-gradient(160deg,${BRAND.dark} 0%,#0f1a2e 50%,${BRAND.darkMid} 100%)`, display: "flex", flexDirection: "column", alignItems: "center", fontFamily: FONT, color: BRAND.white, overflow: "hidden", position: "relative", padding: "8px 10px 16px", boxSizing: "border-box" }}>
-      <style>{CSS}</style>
+    <div style={{ width: "100%", height: "100dvh", maxHeight: "100dvh", overflow: "hidden", position: "fixed", inset: 0, background: `linear-gradient(160deg,${BRAND.dark} 0%,#0f1a2e 50%,${BRAND.darkMid} 100%)`, display: "flex", flexDirection: "column", alignItems: "center", fontFamily: FONT, color: BRAND.white, padding: "8px 10px 16px", boxSizing: "border-box" }}>
 
       {/* HUD */}
-      <div style={{ width: "100%", maxWidth: `${RINK_W}px`, display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px", padding: "0 2px" }}>
+      <div style={{ width: "100%", maxWidth: `${RINK_W * rinkScale}px`, display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px", padding: "0 2px" }}>
         <div style={{ fontSize: "11px", fontWeight: 700, color: BRAND.grayLight, letterSpacing: "1px" }}>STONE {currentStone + 1}/{STONES.length}</div>
         <div style={{ display: "flex", gap: "4px" }}>
           {STONES.map((s, i) => (
@@ -519,8 +890,12 @@ export default function AICurlingGame() {
             </div>
           ))}
         </div>
-        <div style={{ fontSize: "15px", fontWeight: 800, color: BRAND.blue, background: `${BRAND.blue}11`, padding: "3px 10px", borderRadius: "7px" }}>
-          {scores.reduce((s, x) => s + x.points, 0)}
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <div style={{ fontSize: "15px", fontWeight: 800, color: BRAND.blue, background: `${BRAND.blue}11`, padding: "3px 10px", borderRadius: "7px" }}>
+            {scores.reduce((s, x) => s + x.points, 0)}
+          </div>
+          <button onClick={() => { const next = !soundEnabled; setSoundEnabled(next); if (next && !audioCtxRef.current) { try { audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } if (next && audioCtxRef.current && audioCtxRef.current.state === "suspended") { audioCtxRef.current.resume(); } }} style={{ width: "24px", height: "24px", borderRadius: "50%", background: soundEnabled ? `${BRAND.blue}22` : "rgba(255,255,255,0.06)", border: `1.5px solid ${soundEnabled ? BRAND.blue : BRAND.gray}44`, color: BRAND.white, fontSize: "12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }} title={soundEnabled ? "Mute" : "Unmute"}>{soundEnabled ? "\uD83D\uDD0A" : "\uD83D\uDD07"}</button>
+          <button onClick={() => { setShowTut(true); setTutStep(0); }} style={{ width: "24px", height: "24px", borderRadius: "50%", background: "rgba(255,255,255,0.1)", border: "none", color: BRAND.white, fontSize: "13px", fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, fontFamily: FONT }}>?</button>
         </div>
       </div>
 
@@ -534,24 +909,33 @@ export default function AICurlingGame() {
       </div>
 
       {/* ═══ RINK ═══ */}
-      <div
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        onClick={animating ? handleSweep : undefined}
-        style={{
-          width: `${RINK_W}px`, height: `${RINK_H}px`,
-          maxWidth: "100%",
-          background: `linear-gradient(180deg,#162a46 0%,#1a3254 20%,#1b3356 50%,#19304e 75%,#152840 100%)`,
-          borderRadius: "18px", position: "relative", overflow: "hidden",
-          border: `2px solid ${BRAND.blue}22`,
-          boxShadow: `0 0 60px ${BRAND.blue}0a,inset 0 0 80px rgba(0,0,0,0.2)`,
-          cursor: animating ? "pointer" : dragging ? "grabbing" : "default",
-          touchAction: "none", userSelect: "none",
-          animation: sweeping ? "sweepFlash 0.25s ease" : "none",
-        }}
-      >
+      {/* Rink wrapper — takes up the scaled space in layout */}
+      <div style={{
+        width: RINK_W * rinkScale,
+        height: RINK_H * rinkScale,
+        flexShrink: 0,
+        position: 'relative',
+      }}>
+        {/* Inner rink — full virtual size, scaled via CSS transform */}
+        <div
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+          onClick={animating ? handleSweep : undefined}
+          style={{
+            width: RINK_W, height: RINK_H,
+            transform: `scale(${rinkScale})`,
+            transformOrigin: 'top left',
+            background: `linear-gradient(180deg,#162a46 0%,#1a3254 20%,#1b3356 50%,#19304e 75%,#152840 100%)`,
+            borderRadius: "18px", position: "relative", overflow: "hidden",
+            border: `2px solid ${BRAND.blue}22`,
+            boxShadow: `0 0 60px ${BRAND.blue}0a,inset 0 0 80px rgba(0,0,0,0.2)`,
+            cursor: animating ? "pointer" : dragging ? "grabbing" : "default",
+            touchAction: "none", userSelect: "none",
+            animation: sweeping ? "sweepFlash 0.25s ease" : "none",
+          }}
+        >
         {/* Ice lines */}
         {[...Array(16)].map((_, i) => (
           <div key={i} style={{ position: "absolute", left: 0, right: 0, top: `${5 + i * 6}%`, height: "1px", background: "rgba(255,255,255,0.02)" }} />
@@ -601,14 +985,16 @@ export default function AICurlingGame() {
           }}>{ls.emoji}</div>
         ))}
 
-        {/* Trail */}
-        {trail.map((t, i) => (
+        {/* Trail — React-rendered when not animating, DOM-managed during animation */}
+        {!animating && trail.map((t, i) => (
           <div key={i} style={{ position: "absolute", left: t.x - 2, top: t.y - 2, width: "4px", height: "4px", borderRadius: "50%", background: stone.color, opacity: (i / trail.length) * 0.2, pointerEvents: "none" }} />
         ))}
+        {/* Trail container for direct DOM manipulation during animation */}
+        <div ref={trailDomRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 1 }} />
 
         {/* Current stone */}
         {stonePos && !showResult && (
-          <div style={{
+          <div ref={stoneDomRef} style={{
             position: "absolute",
             left: stonePos.x - STONE_R - 4, top: stonePos.y - STONE_R - 4,
             width: (STONE_R + 4) * 2, height: (STONE_R + 4) * 2,
@@ -639,8 +1025,23 @@ export default function AICurlingGame() {
           </svg>
         )}
 
-        {/* Power meter */}
+        {/* Keyboard aim line (shown when not dragging, not animating, not showing result) */}
+        {!dragging && !animating && !showResult && !showTut && stonePos && (
+          <svg style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 8 }}>
+            <line x1={stonePos.x} y1={stonePos.y}
+              x2={stonePos.x + Math.cos(aimAngle) * (keyCharging ? Math.max(keyPower * 12, 60) : 120)}
+              y2={stonePos.y + Math.sin(aimAngle) * (keyCharging ? Math.max(keyPower * 12, 60) : 120)}
+              stroke={stone.color} strokeWidth="2" strokeDasharray="6 4" opacity="0.5" />
+            <circle
+              cx={stonePos.x + Math.cos(aimAngle) * (keyCharging ? Math.max(keyPower * 12, 60) : 120)}
+              cy={stonePos.y + Math.sin(aimAngle) * (keyCharging ? Math.max(keyPower * 12, 60) : 120)}
+              r="6" fill="none" stroke={stone.color} strokeWidth="1.5" opacity="0.35" />
+          </svg>
+        )}
+
+        {/* Power meter (drag or keyboard charging) */}
         {dragging && <PowerMeter power={dragPower} color={stone.color} />}
+        {keyCharging && <PowerMeter power={keyPower} color={stone.color} />}
 
         {/* Sweep prompt */}
         {animating && (
@@ -669,21 +1070,24 @@ export default function AICurlingGame() {
           <div style={{ position: "absolute", bottom: START_Y - STONE_R - 55, left: "50%", transform: "translateX(-50%)", textAlign: "center", pointerEvents: "none" }}>
             <div style={{ fontSize: "20px", marginBottom: "4px", animation: "float 1.5s ease-in-out infinite" }}>👆</div>
             <div style={{ fontSize: "12px", fontWeight: 700, color: BRAND.grayLight, letterSpacing: "1px", fontFamily: FONT, whiteSpace: "nowrap" }}>DRAG THE STONE TO AIM</div>
+            {isDesktop && (
+              <div style={{ fontSize: "10px", fontWeight: 600, color: BRAND.gray, marginTop: "4px", letterSpacing: "0.5px", fontFamily: FONT }}>Arrow keys + Space</div>
+            )}
           </div>
         )}
 
         {/* Tutorial */}
         {showTut && (
           <TutorialOverlay step={tutStep} stoneColor={stone.color}
-            onNext={() => { if (tutStep < 2) setTutStep(p => p + 1); else setShowTut(false); }} />
+            onNext={() => { if (tutStep < 2) setTutStep(p => p + 1); else { localStorage.setItem('curling_tutorial_seen', 'true'); setShowTut(false); } }} />
         )}
 
         {/* Score popup */}
         {showResult && lastScore && (
-          <div style={{ position: "absolute", top: "45%", left: "50%", transform: "translate(-50%,-50%)", textAlign: "center", animation: "popIn 0.5s ease-out forwards", zIndex: 50 }}>
-            <div style={{ background: `${BRAND.dark}f5`, borderRadius: "20px", padding: "28px 36px", border: `2px solid ${lastScore.points >= 50 ? BRAND.blue : BRAND.orange}44`, boxShadow: "0 12px 48px rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}>
+          <div style={{ position: "absolute", top: "30%", left: "50%", transform: "translate(-50%,-50%)", textAlign: "center", animation: "popIn 0.5s ease-out forwards", zIndex: 50 }}>
+            <div style={{ background: `${BRAND.dark}dd`, borderRadius: "20px", padding: "20px 28px", border: `2px solid ${lastScore.points >= 50 ? BRAND.blue : BRAND.orange}44`, boxShadow: "0 12px 48px rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}>
               <div style={{ fontSize: "15px", fontWeight: 700, color: BRAND.grayLight, letterSpacing: "2px", marginBottom: "4px" }}>{lastScore.label}</div>
-              <div style={{ fontSize: "52px", fontWeight: 800, margin: "8px 0", color: lastScore.points >= 75 ? BRAND.blue : lastScore.points >= 50 ? BRAND.green : lastScore.points >= 25 ? BRAND.orange : BRAND.gray }}>+{lastScore.points}</div>
+              <div style={{ fontSize: "40px", fontWeight: 800, margin: "8px 0", color: lastScore.points >= 75 ? BRAND.blue : lastScore.points >= 50 ? BRAND.green : lastScore.points >= 25 ? BRAND.orange : BRAND.gray }}>+{lastScore.points}</div>
               <div style={{ fontSize: "14px", color: BRAND.grayLight, marginBottom: "20px", fontWeight: 600 }}>{lastScore.message}</div>
               <button onClick={nextStone} style={{ fontFamily: FONT, background: `linear-gradient(135deg,${BRAND.blue},${BRAND.blueDark})`, border: "none", borderRadius: "12px", padding: "12px 32px", fontSize: "14px", fontWeight: 800, color: BRAND.white, cursor: "pointer", letterSpacing: "1px", boxShadow: `0 4px 16px ${BRAND.blue}44` }}>
                 {currentStone < STONES.length - 1 ? "NEXT STONE →" : "SEE RESULTS 🏆"}
@@ -691,6 +1095,7 @@ export default function AICurlingGame() {
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* Footer */}

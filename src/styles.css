@@ -1,0 +1,14 @@
+@keyframes tutPulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(37,99,235,0.4)}50%{transform:scale(1.1);box-shadow:0 0 0 14px rgba(37,99,235,0)}}
+@keyframes tutTap{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-8px) scale(0.9)}}
+@keyframes tutDrag{0%,100%{transform:translateY(0)}50%{transform:translateY(25px)}}
+@keyframes tutLine{0%,100%{opacity:0.3;height:20px}50%{opacity:1;height:40px}}
+@keyframes tutSweep{0%,100%{transform:rotate(-15deg)}50%{transform:rotate(15deg)}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+@keyframes popIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.5)}60%{transform:translate(-50%,-50%) scale(1.05)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+@keyframes shimmer{0%{background-position:-200% center}100%{background-position:200% center}}
+@keyframes stonePulse{0%,100%{box-shadow:0 0 0 0 rgba(37,99,235,0.5)}50%{box-shadow:0 0 0 14px rgba(37,99,235,0)}}
+@keyframes sweepMark{from{opacity:0.6;transform:scale(1)}to{opacity:0;transform:scale(1.5)}}
+@keyframes sweepFlash{0%,100%{border-color:rgba(37,99,235,0.13)}50%{border-color:rgba(37,99,235,0.4)}}
+@keyframes broomSwing{0%,100%{transform:translateX(-6px) rotate(-8deg)}50%{transform:translateX(6px) rotate(8deg)}}
